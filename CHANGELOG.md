@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Deliver prompts through the pane for agents whose reported label Herdr
+  cannot prompt at all (for example Command Code, which reports `cmd`): when
+  `agent prompt` refuses such a pane and no detected agent sits behind the
+  label, the relay writes the text and Enter on the raw pane surface, as if
+  typed at the computer. Every other refusal is unchanged. (herdr#4732)
+
 ## [0.22.3] - 2026-09-30
 
 ### Added

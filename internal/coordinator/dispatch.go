@@ -377,7 +377,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandPrompt, paneID, commandDeadline, text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if err := d.deliverPrompt(effectCtx, token, text, requiresEnter); err != nil {
+		if err := d.deliverPrompt(effectCtx, token, text, requiresEnter, true); err != nil {
 			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, action, paneID, nil)}
@@ -389,7 +389,13 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	return result
 }
 
-func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text string, requiresEnter bool) error {
+// deliverPrompt submits text to an agent. `agent prompt` is the normal path;
+// when Herdr will never accept a prompt for the pane (a reported-only agent
+// label, e.g. Command Code's "cmd" — herdr issue #4732) and the caller allows
+// it, the prompt is replanned on the raw pane surface: text, then Enter, like
+// typing at the computer. Qoder always takes the raw path because Herdr's
+// prompt contract does not fit its composer.
+func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text string, requiresEnter, allowPaneFallback bool) error {
 	ctx = herdr.WithDispatchCheck(ctx, func() error { return d.paneSessionError(token) })
 	if err := d.paneSessionError(token); err != nil {
 		return err
@@ -398,7 +404,13 @@ func (d *Dispatcher) deliverPrompt(ctx context.Context, token WorkerToken, text 
 		return errors.Join(herdr.ErrNotStarted, err)
 	}
 	if !requiresEnter {
-		return d.herdr.Prompt(ctx, token.PaneID, text)
+		err := d.herdr.Prompt(ctx, token.PaneID, text)
+		if err == nil {
+			return nil
+		}
+		if !allowPaneFallback || !d.herdr.PromptUnsupported(ctx, token.PaneID, err) {
+			return err
+		}
 	}
 	if err := d.herdr.SendText(ctx, token.PaneID, text); err != nil {
 		return err
@@ -736,7 +748,10 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 					}
 					return herdr.CheckDispatch(ctx)
 				})
-				if err := d.deliverPrompt(promptCtx, token, request.Prompt, requiresEnter); err != nil {
+				// A freshly started agent is promptable through Herdr by
+				// construction; a refusal here means startup, not a label
+				// Herdr cannot prompt, so no raw-pane fallback.
+				if err := d.deliverPrompt(promptCtx, token, request.Prompt, requiresEnter, false); err != nil {
 					return EffectResult{Result: d.failErr(requestID, "submit_prompt", started.PaneID, err)}
 				}
 				if err := d.paneSessionError(token); err != nil {

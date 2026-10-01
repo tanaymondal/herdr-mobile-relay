@@ -77,3 +77,85 @@ func TestAgentNotReadyOutcomeDependsOnOperation(t *testing.T) {
 		})
 	}
 }
+
+// A pane whose agent label was only reported through `pane report-agent` is
+// never accepted by `agent prompt`; the dispatcher must deliver the prompt on
+// the raw pane surface (text, then Enter) instead of dropping it.
+func TestPromptFallsBackToPaneForUnsupportedAgent(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "calls")
+	t.Setenv("HERDR_TEST_ARGS", record)
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$HERDR_TEST_ARGS\"\n"+
+		"if [ \"$1 $2\" = \"agent prompt\" ]; then\n"+
+		"  printf '%s' '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent w1:p1 is not an active named agent\"}}' >&2\n"+
+		"  exit 1\n"+
+		"fi\n"+
+		"if [ \"$1 $2\" = \"agent explain\" ]; then\n"+
+		"  printf '%s' '{\"error\":{\"code\":\"agent_explain_unavailable\",\"message\":\"agent target w1:p1 does not have a detected agent label\"}}' >&2\n"+
+		"  exit 1\n"+
+		"fi\n")
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "w1:p1", Status: "working"}}, state.RevisionCounter())
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "herdr.sock")), state, nil, testLogger())
+	t.Cleanup(func() { _ = d.Close(context.Background()) })
+
+	result := d.Handle(context.Background(), map[string]any{
+		"action": "submit_prompt", "request_id": "fallback", "pane_id": "w1:p1", "text": "hello",
+	})
+	if !result.OK || result.Phase != "completed" {
+		t.Fatalf("result = %+v, want completed fallback delivery", result)
+	}
+	calls, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("read Herdr invocations: %v", err)
+	}
+	got := string(calls)
+	for _, want := range []string{
+		"agent prompt w1:p1 hello",
+		"agent explain w1:p1",
+		"pane send-text w1:p1 hello",
+		"pane send-keys w1:p1 Enter",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Herdr invocations = %q, want %q", got, want)
+		}
+	}
+}
+
+// The same refusal on a pane Herdr can still explain (a detected agent sits
+// behind the label) keeps the refusal: no raw input is written.
+func TestPromptRefusalWithoutFallbackForDetectedAgent(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "calls")
+	t.Setenv("HERDR_TEST_ARGS", record)
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$HERDR_TEST_ARGS\"\n"+
+		"if [ \"$1 $2\" = \"agent prompt\" ]; then\n"+
+		"  printf '%s' '{\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent w1:p1 is not an active named agent\"}}' >&2\n"+
+		"  exit 1\n"+
+		"fi\n"+
+		"if [ \"$1 $2\" = \"agent explain\" ]; then\n"+
+		"  printf '%s' '{\"result\":{\"agent\":\"claude\",\"state\":\"idle\"}}'\n"+
+		"  exit 0\n"+
+		"fi\n")
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "w1:p1", Status: "working"}}, state.RevisionCounter())
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "herdr.sock")), state, nil, testLogger())
+	t.Cleanup(func() { _ = d.Close(context.Background()) })
+
+	result := d.Handle(context.Background(), map[string]any{
+		"action": "submit_prompt", "request_id": "refusal", "pane_id": "w1:p1", "text": "hello",
+	})
+	if result.OK || result.Phase != "not_started" ||
+		result.Error != "Agent is not ready to receive prompts; review the pane before retrying" {
+		t.Fatalf("result = %+v, want the unchanged not-ready refusal", result)
+	}
+	calls, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("read Herdr invocations: %v", err)
+	}
+	if strings.Contains(string(calls), "pane send") {
+		t.Fatalf("fallback wrote input for a detected agent: %q", calls)
+	}
+}

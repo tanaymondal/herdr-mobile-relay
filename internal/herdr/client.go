@@ -735,6 +735,26 @@ func (c *Client) Prompt(ctx context.Context, paneID, text string) error {
 	return err
 }
 
+// PromptUnsupported reports whether a refused agent prompt will never be
+// accepted for this pane, so it can be replanned on the raw pane surface
+// instead. That is the case when Herdr refuses with "is not an active named
+// agent" and `agent explain` says no detected agent sits behind the label:
+// agents that only report their own label (pane report-agent) miss Herdr's
+// compiled-in registry and stay unpromptable (herdr issue #4732 — Command
+// Code reports "cmd" this way). Every other refusal returns false, including
+// a launching agent whose label gets detected a moment later.
+func (c *Client) PromptUnsupported(ctx context.Context, paneID string, refusal error) bool {
+	var cliErr *CLIError
+	if !errors.As(refusal, &cliErr) || cliErr == nil ||
+		cliErr.Code != "agent_not_ready" ||
+		!strings.Contains(cliErr.Message, "is not an active named agent") {
+		return false
+	}
+	_, err := c.runCommand(ctx, "agent", "explain", paneID)
+	var explainErr *CLIError
+	return errors.As(err, &explainErr) && explainErr != nil && explainErr.Code == "agent_explain_unavailable"
+}
+
 func (c *Client) StopPane(ctx context.Context, paneID string) error {
 	_, err := c.runCommand(ctx, "pane", "close", paneID)
 	return err
