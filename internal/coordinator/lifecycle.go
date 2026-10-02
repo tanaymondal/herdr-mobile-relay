@@ -336,9 +336,8 @@ func (l *Lifecycle) ResolveCwd(raw string) (string, error) {
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", errors.New("cwd must be inside the home directory")
 	}
-	if relative == "." {
-		return "", errors.New("cwd must be a project directory below the home directory")
-	}
+	// The home directory itself is a valid launch cwd: starting agents in ~ is
+	// a normal workflow, and the accessibility checks below still apply.
 	root, err := os.OpenRoot(resolvedHome)
 	if err != nil {
 		return "", errors.New("home directory is unavailable")
